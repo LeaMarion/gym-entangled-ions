@@ -1,17 +1,18 @@
 import numpy as np
 from scipy import linalg
 from functools import reduce
+from itertools import permutations
 
 from gym_entangled_ions.operations.qudit_qm import QuditQM
 
 class LaserGates(QuditQM):
-    def __init__(self, dim, num_ions, phases):
+    def __init__(self, dim, num_ions, phases, ms_gate_choice = 'local'):
         """
         This class generates the required gate set for an ion trap quantum
         computer as described in https://arxiv.org/pdf/1907.08569.pdf.
         Specifically, it implements single-qudit gates of the form Eq. (2) given
         angles theta (here 'pulse_angles') and phi (here 'pulse_phases').
-        Moreover, it generates Molmer-Sorensen gates of the form Eq. (6) given
+        Moreover, it generates Molmer-Sorensen (ms) gates of the form Eq. (6) given
         angles theta (here 'ms_phases').
 
         Args:
@@ -31,10 +32,13 @@ class LaserGates(QuditQM):
         self.pulse_phases = phases['pulse_phases']
         #list: List of angles theta in Eq. (6)
         self.ms_phases = phases['ms_phases']
+        # if 'local' generates the gate set with the local ms set, if 'global' generate gate set with global ms gate
+        self.ms_gate_choice = ms_gate_choice
         #`list` of `np.ndarray`: List of unitaries.
         self.gates = []
         # fills the `gates` with unitaries as specified by the angles.
         self._generate_gates()
+
 
     def pulse(self, j, k, theta, phi):
         """
@@ -127,6 +131,45 @@ class LaserGates(QuditQM):
 
         return ms
 
+    def two_qudit_molmer_sorensen(self,i_1,i_2,theta):
+        """
+        Molmer-Sorensen (MS) gate from Eq. (6) of 
+        https://arxiv.org/pdf/1907.08569.pdf.
+        This is a global laser beam that can entangle all ions.
+
+        .. math::
+            U_{\mathrm{MS}}(\theta_0) = \exp\left(i\theta_0\left(S_{x,p_1}+S_{x,p_2}\right)^2\right)
+            S_{x} = (S_{+} + S_{-})/2
+
+        where S_{+} and S_{-} are creation and annihilation operators.
+
+        Args:
+            i_1 (int): The first party that the gate is applyied to
+            i_2 (int): The second party that the gate is applyied to
+            theta (float): The MS phase (depending on the Rabi frequency).
+        Returns:
+            ms (np.ndarray): MS gate unitary acting on all ions.
+        """
+        # define generalized X gate
+        sx = (self.creation() + self.annihilation()) / 2.
+        # define empty ms gate exponent
+        ms = np.zeros((self.dim ** self.num_ions, self.dim ** self.num_ions),
+                      dtype=complex
+                      )
+        # calculate matrix exponent, i.e. sum of Sx for the ions i_1 and i_2
+        # define list of empty single-ion identities
+        sx_i_1 = [np.eye(self.dim) for i in range(self.num_ions)]
+        sx_i_2 = [np.eye(self.dim) for i in range(self.num_ions)]
+        # add Sx at position of the desired ion i
+        sx_i_1[i_1] = sx
+        sx_i_2[i_2] = sx
+         # apply tensor product between single-ion gates and add up
+        ms = reduce(np.kron, sx_i_1)+reduce(np.kron, sx_i_2)
+        # definition Eq. (6)
+        ms = linalg.expm(1.j * theta * (np.linalg.matrix_power(ms, 2)))
+        return ms
+
+
     # ---------------------- helper methods ------------------------------------
     
     def _generate_gates(self):
@@ -135,8 +178,15 @@ class LaserGates(QuditQM):
         the provided list of phases.
         """
         # add ms gate for each angle theta
-        for theta in self.ms_phases:
-            self.gates.append(self.molmer_sorensen(theta))
+        if self.ms_gate_choice == 'global':
+            for theta in self.ms_phases:
+                self.gates.append(self.molmer_sorensen(theta))
+        elif self.ms_gate_choice == 'local':
+            for theta in self.ms_phases:
+                for ions in permutations(range(self.num_ions), 2):
+                    self.gates.append(self.two_qudit_molmer_sorensen(ions[0],ions[1],theta))
+        else:
+            raise NotImplementedError("This ms-gate choice is not yet implemented, use 'global' or 'local' ")
         
         # adds all single-ion gates
         # for all ions
